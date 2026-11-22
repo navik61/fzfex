@@ -1,0 +1,844 @@
+#!/usr/bin/env python3
+"""fzfex – fzf s náhledem v externím okně (niri / Wayland).
+
+Použití:
+    fzfex [volby fzf...]          # vstup ze stdin, jinak FZF_DEFAULT_COMMAND
+    fzfex -E [volby fzf...]       # náhled na externím monitoru (výchozí DP-2)
+    fzfex --external=VÝSTUP ...   # náhled na zadaném monitoru
+    fzfex -E -m                   # každý vybraný soubor ve vlastním okně, okna v mřížce
+Enter = nabídka „Otevřít v…“ (po otevření fzfex skončí), alt-enter = vypsat výběr.
+Interní podpříkazy (volá je fzf):
+    fzfex --show CESTA...         # zobraz náhled(y) (neblokuje, debounce)
+    fzfex --show-list SOUBOR      # totéž, cesty po řádcích v souboru ({+f} z fzf)
+    fzfex --info CESTA            # text do vnitřního preview panelu fzf
+    fzfex --toggle SOUBOR         # zapni/vypni externí náhled
+    fzfex --menu SOUBOR           # nabídka aplikací (fzf transform)
+    fzfex --close                 # zavři aktuální náhledová okna
+"""
+
+import fcntl
+import fnmatch
+import json
+import math
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+# ---------------------------------------------------------------- konfigurace
+ENV = os.environ
+MODE = ENV.get("FZFEX_MODE", "auto")            # auto | beside | pane | fixed
+PANE = int(ENV.get("FZFEX_PANE", "50"))         # % šířky terminálu pro preview panel fzf
+MIN_W = int(ENV.get("FZFEX_MIN_W", "500"))      # min. volné místo pro režim beside
+MIN_W_FLOAT = int(ENV.get("FZFEX_MIN_W_FLOAT", "300"))  # totéž pro plovoucí terminál
+MAX_W = int(ENV.get("FZFEX_MAX_W", "1400"))     # max. šířka okna v režimu beside
+MIN_H = int(ENV.get("FZFEX_MIN_H", "600"))      # min. výška okna v režimu beside
+# náhled na jiném monitoru, když terminál běží na některém z těchto výstupů (např. "eDP-1")
+# FZFEX_EXTERNAL_FROM (alias FZFEX_EXTERNAL) = monitory, ODKUD (kde běží terminál)
+# FZFEX_EXTERNAL_TO (alias FZFEX_EXTERNAL_OUTPUT) = monitor, KAM; prázdné = největší jiný
+_from = ENV.get("FZFEX_EXTERNAL_FROM") or ENV.get("FZFEX_EXTERNAL", "")
+EXTERNAL = [o.strip() for o in _from.split(",") if o.strip()]
+EXTERNAL_OUTPUT = ENV.get("FZFEX_EXTERNAL_TO") or ENV.get("FZFEX_EXTERNAL_OUTPUT", "")
+FORCE_EXTERNAL = ENV.get("FZFEX_FORCE_EXTERNAL") == "1"   # nastaví volba -E
+E_DEFAULT_TO = "DP-2"                                     # cíl pro -E, když není FZFEX_EXTERNAL_TO
+EXTERNAL_SIZE = int(ENV.get("FZFEX_EXTERNAL_SIZE", "90"))  # % pracovní plochy cílového monitoru
+DEBOUNCE = float(ENV.get("FZFEX_DEBOUNCE", "0.15"))
+TIMEOUT = float(ENV.get("FZFEX_TIMEOUT", "5"))
+TERM_CMD = ENV.get("FZFEX_TERM", "kitty --class fzfex-preview -e")
+OPEN_TERM = ENV.get("FZFEX_OPEN_TERM", "kitty -e")        # terminál pro „Otevřít v…“
+CONFIG = os.path.join(ENV.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+                      "fzfex", "config")
+SELF = os.path.realpath(sys.argv[0])
+
+
+def default_rules():
+    """Vestavěná pravidla – použijí se, pokud žádné pravidlo z configu nesedí."""
+    pager = "bat --paging=always --color=always --style=full {}" if shutil.which("bat") \
+        else "less -R {}"
+    if shutil.which("eza"):
+        lister = "sh -c 'eza -la --tree --level=2 --color=always --icons \"$1\" | less -R' _ {}"
+    else:
+        lister = "sh -c 'ls -la --color=always \"$1\" | less -R' _ {}"
+    textual = ["text/*", "application/json", "application/xml", "application/javascript",
+               "application/x-shellscript", "application/toml", "application/x-yaml",
+               "inode/x-empty"]
+    rules = [(p, f"{TERM_CMD} {pager}") for p in textual]
+    rules.append(("inode/directory", f"{TERM_CMD} {lister}"))
+    return rules
+
+
+def load_rules():
+    """Řádky `mime-glob = příkaz`; `{}` se nahradí cestou, `xdg` = výchozí aplikace."""
+    rules = []
+    try:
+        with open(CONFIG) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                pat, cmd = (s.strip() for s in line.split("=", 1))
+                rules.append((pat, cmd))
+    except FileNotFoundError:
+        pass
+    return rules + default_rules()
+
+
+# ---------------------------------------------------------------- stav
+def state_dir():
+    sess = ENV.get("FZFEX_SESSION")
+    if not sess:
+        sys.exit("fzfex: FZFEX_SESSION není nastaveno (spouštěj přes `fzfex`)")
+    d = os.path.join(ENV.get("XDG_RUNTIME_DIR", "/tmp"), f"fzfex-{sess}")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def rd(name, default=""):
+    try:
+        with open(os.path.join(state_dir(), name)) as f:
+            return f.read()
+    except FileNotFoundError:
+        return default
+
+
+def wr(name, data):
+    p = os.path.join(state_dir(), name)
+    with open(p + ".tmp", "w") as f:
+        f.write(data)
+    os.replace(p + ".tmp", p)
+
+
+class Lock:
+    def __enter__(self):
+        self.f = open(os.path.join(state_dir(), "lock"), "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *a):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+# ---------------------------------------------------------------- niri
+def niri_json(*args):
+    out = subprocess.run(["niri", "msg", "--json", *args], capture_output=True, text=True)
+    return json.loads(out.stdout) if out.returncode == 0 and out.stdout.strip() else None
+
+
+def niri_action(*args):
+    subprocess.run(["niri", "msg", "action", *map(str, args)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def niri_gaps():
+    if "FZFEX_GAPS" in ENV:
+        return int(ENV["FZFEX_GAPS"])
+    try:
+        with open(os.path.expanduser("~/.config/niri/config.kdl")) as f:
+            for line in f:
+                m = re.match(r"\s*gaps\s+(\d+)", line)
+                if m:
+                    return int(m.group(1))
+    except OSError:
+        pass
+    return 16
+
+
+def term_rect(term, windows, out_w, gaps):
+    """Odhad polohy okna terminálu v souřadnicích pohledu pracovní plochy."""
+    if "FZFEX_TERM_GEOM" in ENV:
+        return [int(v) for v in ENV["FZFEX_TERM_GEOM"].split(",")]
+    lay = term["layout"]
+    tw, th = lay["tile_size"]
+    if lay.get("tile_pos_in_workspace_view"):          # plovoucí terminál – přesná poloha
+        tx, ty = lay["tile_pos_in_workspace_view"]
+        return [int(tx), int(ty), int(tw), int(th)]
+    # dlaždicový terminál: niri polohu neposkytuje -> spočítej z rozložení sloupců
+    col, row = lay["pos_in_scrolling_layout"]
+    cols = {}
+    for w in windows:
+        p = w["layout"].get("pos_in_scrolling_layout")
+        if w["workspace_id"] == term["workspace_id"] and not w["is_floating"] and p:
+            cols.setdefault(p[0], []).append(w)
+    tx = gaps
+    for c in sorted(k for k in cols if k < col):
+        tx += max(w["layout"]["tile_size"][0] for w in cols[c]) + gaps
+    if tx + tw + gaps > out_w:                         # pohled je odscrollovaný doprava
+        tx = out_w - gaps - tw
+    ty = gaps
+    for w in cols.get(col, []):
+        if w["layout"]["pos_in_scrolling_layout"][1] < row:
+            ty += w["layout"]["tile_size"][1] + gaps
+    return [int(tx), int(ty), int(tw), int(th)]
+
+
+def work_height(windows, ws_id, out_h, gaps):
+    """Výška pracovní plochy (bez exkluzivních panelů) odhadnutá z dlaždic."""
+    cols = {}
+    for w in windows:
+        p = w["layout"].get("pos_in_scrolling_layout")
+        if w["workspace_id"] == ws_id and not w["is_floating"] and p:
+            cols.setdefault(p[0], []).append(w["layout"]["tile_size"][1])
+    if not cols:
+        return out_h
+    return int(max(sum(hs) + (len(hs) + 1) * gaps for hs in cols.values()))
+
+
+def external_geom(term_output, windows, outs, gaps):
+    """Terminál na výstupu z FZFEX_EXTERNAL -> náhled uprostřed jiného monitoru."""
+    if not term_output or (term_output not in EXTERNAL and not FORCE_EXTERNAL):
+        return None
+    others = {n: o for n, o in outs.items() if n != term_output and o.get("logical")}
+    if not others:
+        return None
+    name = EXTERNAL_OUTPUT if EXTERNAL_OUTPUT in others else \
+        max(others, key=lambda n: others[n]["logical"]["width"] * others[n]["logical"]["height"])
+    lo = others[name]["logical"]
+    ws_id = next((w["id"] for w in niri_json("workspaces") or []
+                  if w["output"] == name and w["is_active"]), None)
+    aw, ah = lo["width"], work_height(windows, ws_id, lo["height"], gaps)
+    w, h = aw * EXTERNAL_SIZE // 100, ah * EXTERNAL_SIZE // 100
+    return {"geom": [(aw - w) // 2, (ah - h) // 2, w, h], "area": [aw, ah],
+            "gaps": gaps, "output": name}
+
+
+def target_geom():
+    """-> {"geom": [x, y, w, h], "area": [šířka, výška], "gaps": n}"""
+    windows = niri_json("windows") or []
+    tid = int(ENV.get("FZFEX_TERM_WID", "-1"))
+    term = next((w for w in windows if w["id"] == tid), None)
+    gaps = niri_gaps()
+    ws_id = term["workspace_id"] if term else None
+    if ws_id is None:
+        ws_id = next((w["id"] for w in niri_json("workspaces") or [] if w["is_focused"]), None)
+    ws = next((w for w in niri_json("workspaces") or [] if w["id"] == ws_id), None)
+    outs = niri_json("outputs") or {}
+    lo = (outs.get(ws["output"]) if ws else None) or next(iter(outs.values()), {})
+    lo = lo.get("logical") or {"width": 1920, "height": 1080}
+    out_w = lo["width"]
+    out_h = work_height(windows, ws_id, lo["height"], gaps)
+    area = {"area": [out_w, out_h], "gaps": gaps}
+    ext = external_geom(ws["output"] if ws else None, windows, outs, gaps)
+    if ext:
+        return ext
+    if MODE == "fixed" or term is None:
+        g = ENV.get("FZFEX_GEOM", "1200,40,1300,1300")
+        return {"geom": [int(v) for v in g.split(",")], **area}
+    tx, ty, tw, th = term_rect(term, windows, out_w, gaps)
+
+    free_r = out_w - (tx + tw) - 2 * gaps
+    free_l = tx - 2 * gaps
+    mode = MODE
+    if mode == "auto":
+        # plovoucí terminál se při fokusu (i najetím myši) vytáhne nad náhled,
+        # proto se u něj překrytí vyhýbáme i za cenu užšího okna
+        need = MIN_W_FLOAT if term["is_floating"] else MIN_W
+        mode = "beside" if max(free_r, free_l) >= need else "pane"
+    if mode == "beside":
+        w = min(max(free_r, free_l), MAX_W)
+        x = tx + tw + gaps if free_r >= free_l else tx - gaps - w
+        h = min(max(th, MIN_H), out_h - 2 * gaps)
+        y = max(gaps, min(ty, out_h - gaps - h))
+        return {"geom": [x, y, w, h], **area}
+    # pane: přes vnitřní preview panel fzf (pravá část terminálu)
+    pw = tw * PANE // 100
+    return {"geom": [tx + tw - pw, ty, pw, th], **area}
+
+
+def window_size(wid):
+    w = next((w for w in niri_json("windows") or [] if w["id"] == wid), None)
+    return w["layout"]["tile_size"] if w else None
+
+
+def place(wid, tg, resize=True):
+    """Nastav velikost a polohu; když je okno i tak větší, posuň ho celé na obrazovku."""
+    x, y, w, h = (max(0, int(v)) for v in tg["geom"])
+    aw, ah = tg["area"]
+    gaps = tg["gaps"]
+    if tg.get("output"):
+        win = next((w for w in niri_json("windows") or [] if w["id"] == wid), None)
+        ws_out = {w["id"]: w["output"] for w in niri_json("workspaces") or []}
+        if win and ws_out.get(win["workspace_id"]) != tg["output"]:
+            niri_action("move-window-to-monitor", "--id", wid, tg["output"])
+    niri_action("move-window-to-floating", "--id", wid)
+    size = window_size(wid)
+    if resize or (size and (size[0] > w or size[1] > h)):
+        niri_action("set-window-width", "--id", wid, w)
+        niri_action("set-window-height", "--id", wid, h)
+        time.sleep(0.05)
+        size = window_size(wid)
+    if size:                                           # aplikace si mohla vynutit jinou velikost
+        rw, rh = int(size[0]), int(size[1])
+        if tg.get("output") or tg.get("center"):       # externí monitor / buňka mřížky: na střed
+            x, y = x + (w - rw) // 2, y + (h - rh) // 2
+        x = max(gaps, min(x, aw - gaps - rw)) if rw + 2 * gaps <= aw else 0
+        y = max(gaps, min(y, ah - gaps - rh)) if rh + 2 * gaps <= ah else 0
+    niri_action("move-floating-window", "--id", wid, "-x", x, "-y", y)
+
+
+def refocus_terminal():
+    """Vrať fokus terminálu, ale jen pokud ho náhled opravdu sebral.
+
+    focus-window v niri plovoucí okno vždy vytáhne nahoru – zbytečné volání by tak
+    plovoucí terminál dalo nad náhled (náhled by skončil vzadu).
+    """
+    tid = ENV.get("FZFEX_TERM_WID")
+    if not tid:
+        return
+    foc = niri_json("focused-window") or {}
+    if str(foc.get("id")) != tid:
+        niri_action("focus-window", "--id", tid)
+
+
+# ---------------------------------------------------------------- spouštění aplikace
+def mime_of(path):
+    if os.path.isdir(path):
+        return "inode/directory"
+    r = subprocess.run(["file", "-b", "--mime-type", "-L", path], capture_output=True, text=True)
+    return r.stdout.strip() or "application/octet-stream"
+
+
+def find_desktop(did):
+    dirs = [ENV.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))]
+    dirs += ENV.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
+    for d in dirs:
+        p = os.path.join(d, "applications", did)
+        if os.path.isfile(p):
+            return p
+        p = os.path.join(d, "applications", did.replace("-", "/", 1))
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def desktop_argvs(f, paths, term=TERM_CMD):
+    """Příkazy z .desktop souboru pro dané cesty (%F/%U = vše najednou, %f/%u = po jedné)."""
+    exec_line, terminal, in_entry = None, False, False
+    with open(f, errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if line.startswith("["):
+                in_entry = line == "[Desktop Entry]"
+            elif in_entry and line.startswith("Exec=") and exec_line is None:
+                exec_line = line[5:]
+            elif in_entry and line.startswith("Terminal="):
+                terminal = line[9:].strip().lower() == "true"
+    if not exec_line:
+        return []
+    try:
+        toks = shlex.split(exec_line)
+    except ValueError:
+        return []
+    many = any(re.search(r"%[FU]", t) for t in toks)
+    single = any(re.search(r"%[fu]", t) for t in toks)
+
+    def build(ps):
+        argv = []
+        for tok in toks:
+            if tok in ("%f", "%F", "%u", "%U"):
+                argv += ps
+                continue
+            if re.search(r"%[fFuU]", tok):
+                tok = re.sub(r"%[fFuU]", ps[0].replace("\\", "\\\\"), tok)
+            tok = re.sub(r"%[dDnNickvm]", "", tok).replace("%%", "%")
+            if tok:
+                argv.append(tok)
+        if not (many or single):
+            argv += ps
+        return shlex.split(term) + argv if terminal else argv
+
+    if single and not many:
+        return [build([p]) for p in paths]
+    return [build(list(paths))]
+
+
+def desktop_cmd(mime, path):
+    """Příkaz z .desktop výchozí aplikace pro daný mimetype."""
+    did = subprocess.run(["xdg-mime", "query", "default", mime],
+                         capture_output=True, text=True).stdout.strip()
+    f = find_desktop(did) if did else None
+    argvs = desktop_argvs(f, [path]) if f else []
+    return (argvs[0] if argvs else None), did
+
+
+# aplikace, které si velikost okna určují samy podle obsahu: dostanou max. rozměr
+# jako parametr a skript jim okno nepřetahuje (jen ho posune, aby bylo celé vidět)
+SIZE_HINTS = {
+    "viim": lambda w, h: ["-W", str(w), "-H", str(h)],
+    "mpv": lambda w, h: [f"--autofit-larger={w}x{h}"],
+}
+
+
+def add_size_hint(argv, geom):
+    """Vlož nápovědu velikosti hned za spustitelný soubor. -> (argv, samo_si_určuje_velikost)"""
+    if not geom:
+        return argv, False
+    for i, tok in enumerate(argv[:3]):                 # přeskoč případné env/flatpak prefixy
+        name = os.path.basename(tok)
+        if name in SIZE_HINTS:
+            return argv[:i + 1] + SIZE_HINTS[name](geom[2], geom[3]) + argv[i + 1:], True
+    return argv, False
+
+
+def resolve(path, geom=None):
+    """-> (argv, popis aplikace, samo_si_určuje_velikost)"""
+    mime = mime_of(path)
+    w, h = (geom[2], geom[3]) if geom else (1200, 900)
+    for pat, cmd in load_rules():
+        if fnmatch.fnmatch(mime, pat):
+            if cmd == "xdg":
+                break
+            if cmd == "none":
+                return None, "žádný externí náhled", False
+            q = shlex.quote(path)
+            selfsize = "{w}" in cmd or "{h}" in cmd
+            cmd = cmd.replace("{w}", str(w)).replace("{h}", str(h))
+            s = cmd.replace("{}", q) if "{}" in cmd else f"{cmd} {q}"
+            return ["sh", "-c", s], s, selfsize
+    argv, did = desktop_cmd(mime, path)
+    if argv:
+        argv, selfsize = add_size_hint(argv, geom)
+        return argv, did, selfsize
+    return ["xdg-open", path], f"xdg-open ({did or '?'})", False
+
+
+def sid_of(pid):
+    """Session id procesu (pole 6 v /proc/PID/stat)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[3])
+    except (OSError, IndexError, ValueError, TypeError):
+        return None
+
+
+def wait_windows(before, items, gen=None):
+    """Přiřaď položkám (každá má "pid" = session) jejich nová okna -> it["wid"]."""
+    t0 = time.time()
+    pending, claimed = list(items), set()
+    while pending and time.time() - t0 < TIMEOUT:
+        if gen is not None and rd("want") != gen:
+            return
+        new = [w for w in niri_json("windows") or []
+               if w["id"] not in before and w["id"] not in claimed]
+        for w in new:
+            sid = sid_of(w.get("pid"))
+            it = next((i for i in pending if i["pid"] == sid), None)
+            if it:
+                it["wid"] = w["id"]
+                claimed.add(w["id"])
+                pending.remove(it)
+        if pending and time.time() - t0 > 1.0:         # jednoinstanční aplikace (D-Bus apod.)
+            for w in new:
+                if w["id"] not in claimed and pending:
+                    pending.pop(0)["wid"] = w["id"]
+                    claimed.add(w["id"])
+        time.sleep(0.04)
+
+
+def load_state():
+    try:
+        st = json.loads(rd("state") or "[]")
+    except ValueError:
+        return []
+    return st if isinstance(st, list) else []
+
+
+def save_state(items):
+    wr("state", json.dumps(items))
+
+
+def close_items(items):
+    """Zavři okna; procesy, které do 0,3 s neskončí, dostanou SIGTERM."""
+    if not items:
+        return
+    alive = {w["id"] for w in niri_json("windows") or []}
+    for it in items:
+        if it.get("wid") in alive:
+            niri_action("close-window", "--id", it["wid"])
+    pids = {it["pid"] for it in items if it.get("pid")}
+    for _ in range(10):
+        for pid in list(pids):
+            try:
+                os.killpg(pid, 0)
+            except OSError:
+                pids.discard(pid)
+        if not pids:
+            return
+        time.sleep(0.03)
+    for pid in pids:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+
+def close_current():
+    items = load_state()
+    save_state([])
+    close_items(items)
+
+
+def grid_cells(n, tg):
+    """Rozděl místo pro náhled na n buněk (mřížka podle poměru stran, poslední řádek na střed)."""
+    if n <= 1:
+        return [tg]
+    g = tg["gaps"]
+    if tg.get("output"):                               # externí monitor: celá pracovní plocha
+        aw, ah = tg["area"]
+        rx, ry, rw, rh = g, g, aw - 2 * g, ah - 2 * g
+    else:
+        rx, ry, rw, rh = tg["geom"]
+    best = None
+    for cols in range(1, n + 1):
+        rows = math.ceil(n / cols)
+        cw, ch = (rw - (cols - 1) * g) / cols, (rh - (rows - 1) * g) / rows
+        if cw <= 0 or ch <= 0:
+            continue
+        score = min(cw, ch * 4 / 3)                    # šířka využitelná pro obsah 4:3
+        if best is None or score > best[0] + 0.5:
+            best = (score, cols, cw, ch)
+    _, cols, cw, ch = best or (0, n, rw / n, rh)
+    cells = []
+    for i in range(n):
+        r, c = divmod(i, cols)
+        in_row = min(cols, n - r * cols)
+        x = rx + (cols - in_row) * (cw + g) / 2 + c * (cw + g)
+        y = ry + r * (ch + g)
+        cells.append({**tg, "geom": [int(x), int(y), int(cw), int(ch)], "center": True})
+    return cells
+
+
+def worker(paths, gen):
+    time.sleep(DEBOUNCE)
+    if rd("want") != gen:
+        return
+    with Lock():
+        if rd("want") != gen:
+            return
+        items = load_state()
+        paths = [p for p in dict.fromkeys(paths) if p and os.path.exists(p)]
+        paths = [p for p in paths if resolve(p)[0]] if not rd("disabled") else []
+        alive = {w["id"] for w in niri_json("windows") or []}
+        keep = [it for it in items if it["path"] in paths and it.get("wid") in alive]
+        save_state(keep)
+        close_items([it for it in items if it not in keep])
+        if not paths:
+            return
+        cells = dict(zip(paths, grid_cells(len(paths), target_geom())))
+        have = {it["path"] for it in keep}
+        before = alive | {w["id"] for w in niri_json("windows") or []}
+        started = []
+        for p in paths:
+            if p in have:
+                continue
+            argv, _, selfsize = resolve(p, cells[p]["geom"])
+            try:
+                proc = subprocess.Popen(argv, start_new_session=True, cwd=os.path.dirname(p) or None,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL)
+            except OSError:
+                continue
+            started.append({"path": p, "pid": proc.pid, "wid": None, "selfsize": selfsize})
+        keep += started
+        save_state(keep)                               # i nedokončené -> další běh je zavře
+        wait_windows(before, started, gen)
+        save_state(keep)
+        shown = [it for it in keep if it.get("wid")]
+        for it in shown:
+            place(it["wid"], cells[it["path"]], resize=not it.get("selfsize"))
+        refocus_terminal()
+        for delay in (0.25, 0.5, 1.0):                 # aplikace si velikost mění po načtení obsahu
+            time.sleep(delay)
+            if rd("want") != gen:
+                break
+            for it in shown:
+                place(it["wid"], cells[it["path"]], resize=not it.get("selfsize"))
+
+
+def detach():
+    """Double fork: v rodiči vrátí True, potomek pokračuje odpojený (bez stdio)."""
+    if os.fork() > 0:
+        return True
+    os.setsid()
+    if os.fork() > 0:
+        os._exit(0)
+    fd = os.open(os.devnull, os.O_RDWR)
+    for i in (0, 1, 2):
+        os.dup2(fd, i)
+    return False
+
+
+def spawn_worker(paths):
+    gen = str(time.time_ns())
+    wr("want", gen)
+    if detach():
+        return
+    try:
+        worker(paths, gen)
+    finally:
+        os._exit(0)
+
+
+def read_list(f):
+    """Cesty z {+f} souboru fzf (po řádcích) -> absolutní cesty."""
+    try:
+        with open(f, errors="replace") as fh:
+            lines = [ln.rstrip("\n") for ln in fh]
+    except OSError:
+        return []
+    return [os.path.abspath(os.path.expanduser(ln)) for ln in lines if ln]
+
+
+# ---------------------------------------------------------------- nabídka „Otevřít v…“
+TEXTUAL = ("text/", "application/json", "application/xml", "application/javascript",
+           "application/x-shellscript", "application/toml", "application/x-yaml", "inode/x-empty")
+
+
+def menu_options(paths):
+    """-> [{"label", "detail", "argvs"}]; argvs = None znamená vypsat výběr na stdout."""
+    mimes = list(dict.fromkeys(mime_of(p) for p in paths))
+    opts, seen = [], set()
+
+    def add(label, detail, argvs):
+        key = tuple(map(tuple, argvs or []))           # stejný příkaz = jedna položka
+        if argvs and key not in seen:
+            seen.add(key)
+            opts.append({"label": label, "detail": detail, "argvs": argvs})
+
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio
+        lists = [Gio.AppInfo.get_all_for_type(m) for m in mimes]
+        common = set.intersection(*({a.get_id() for a in lst} for lst in lists)) if lists else set()
+        apps = [a for a in lists[0] if a.get_id() in common] if lists else []
+        default = Gio.AppInfo.get_default_for_type(mimes[0], False)
+        if default and default.get_id() in common:
+            apps.sort(key=lambda a: a.get_id() != default.get_id())
+        for a in apps:
+            f = a.get_filename() if hasattr(a, "get_filename") else None
+            if not f:
+                continue
+            argvs = desktop_argvs(f, paths, OPEN_TERM)
+            prog = os.path.basename(argvs[0][0]) if argvs else ""
+            dflt = default and a.get_id() == default.get_id()
+            add(a.get_name(), prog + ("  · výchozí" if dflt else ""), argvs)
+    except (ImportError, ValueError):
+        for p in paths[:1]:
+            argv, did = desktop_cmd(mimes[0], p)
+            if argv:
+                add(did.removesuffix(".desktop"), "výchozí", [desktop_cmd(mime_of(q), q)[0]
+                                                              for q in paths])
+    textual = all(m.startswith(TEXTUAL) for m in mimes)
+    editor = ENV.get("VISUAL") or ENV.get("EDITOR")
+    if textual and editor:
+        add(f"Editor {os.path.basename(editor.split()[0])}", "v terminálu",
+            [shlex.split(OPEN_TERM) + shlex.split(editor) + list(paths)])
+    rule = [resolve(p) for p in paths]
+    if all(r[0] and r[0][:2] == ["sh", "-c"] for r in rule):
+        short = re.sub(r"^.*? -e ", "", rule[0][1]).split(" --")[0]
+        add("Jako náhled fzfex", short[:60], [r[0] for r in rule])
+    if not opts:
+        add("xdg-open", "výchozí aplikace systému", [["xdg-open", p] for p in paths])
+    opts.append({"label": "Vypsat cestu na stdout", "detail": "bez otevření (jako fzf)",
+                 "argvs": None})
+    return opts
+
+
+def run_menu_ui(title, subtitle, opts):
+    """Průhledná nabídka (fzfex-menu.py); bez GTK přes rofi. -> index, nebo None."""
+    ui = os.path.join(os.path.dirname(SELF), "fzfex-menu.py")
+    data = json.dumps({"title": title, "subtitle": subtitle,
+                       "items": [{"label": o["label"], "detail": o["detail"]} for o in opts]})
+    rc = 2
+    if os.path.isfile(ui):
+        r = subprocess.run([sys.executable, ui], input=data, capture_output=True, text=True)
+        rc = r.returncode
+        if rc == 0 and r.stdout.strip().isdigit():
+            return int(r.stdout.strip())
+    if rc == 2 and shutil.which("rofi"):               # GTK4 není k dispozici
+        lines = "\n".join(f'{o["label"]}  ({o["detail"]})' for o in opts)
+        r = subprocess.run(["rofi", "-dmenu", "-i", "-no-custom", "-format", "i", "-p", title],
+                           input=lines, capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip().isdigit():
+            return int(r.stdout.strip())
+    return None
+
+
+def launch(argvs, output=None):
+    """Spusť odpojeně; s output přesuň nová okna na daný monitor (pomocník na pozadí)."""
+    before = {w["id"] for w in niri_json("windows") or []}
+    items = []
+    for argv in argvs:
+        cwd = next((os.path.dirname(t) for t in reversed(argv) if os.path.isabs(t)
+                    and os.path.exists(t)), None)
+        try:
+            proc = subprocess.Popen(argv, start_new_session=True, cwd=cwd,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+        except OSError:
+            continue
+        items.append({"pid": proc.pid, "wid": None})
+    if not items or not output or detach():
+        return bool(items)
+    try:
+        wait_windows(before, items)
+        ws_out = {w["id"]: w["output"] for w in niri_json("workspaces") or []}
+        wins = {w["id"]: w for w in niri_json("windows") or []}
+        for it in items:
+            w = wins.get(it["wid"])
+            if w and ws_out.get(w["workspace_id"]) != output:
+                niri_action("move-window-to-monitor", "--id", w["id"], output)
+        if items[0]["wid"]:
+            niri_action("focus-window", "--id", items[0]["wid"])
+    finally:
+        os._exit(0)
+
+
+def menu(paths):
+    """Enter ve fzf (transform): vypíše akce pro fzf – abort po otevření, accept = stdout."""
+    paths = [p for p in paths if os.path.exists(p)]
+    if not paths:
+        print("accept")
+        return
+    opts = menu_options(paths)
+    names = ", ".join(os.path.basename(p) for p in paths[:3])
+    if len(paths) > 3:
+        names += f" … (+{len(paths) - 3})"
+    choice = run_menu_ui("Otevřít v…", names, opts)
+    if choice is None or not 0 <= choice < len(opts):
+        refocus_terminal()
+        return
+    opt = opts[choice]
+    if opt["argvs"] is None:
+        print("accept")
+        return
+    output = target_geom().get("output")               # -E / EXTERNAL_FROM -> externí monitor
+    if launch(opt["argvs"], output):
+        wr("opened", "1")
+        print("abort")
+    else:
+        refocus_terminal()
+
+
+# ---------------------------------------------------------------- vnitřní preview panel
+def human(n):
+    for u in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024:
+            return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
+        n /= 1024
+    return f"{n:.1f} TiB"
+
+
+def placement_desc():
+    """Kam a proč se náhled umístí – pro kontrolu nastavení."""
+    windows = niri_json("windows") or []
+    term = next((w for w in windows if str(w["id"]) == ENV.get("FZFEX_TERM_WID")), None)
+    ws_out = {w["id"]: w["output"] for w in niri_json("workspaces") or []}
+    out = ws_out.get(term["workspace_id"], "?") if term else "?"
+    tg = target_geom()
+    x, y, w, h = tg["geom"]
+    where = f"externí monitor {tg['output']}" if tg.get("output") else f"režim {MODE}"
+    if FORCE_EXTERNAL:
+        where += " (-E)"
+    src = ",".join(EXTERNAL) or "–"
+    dst = EXTERNAL_OUTPUT or "největší jiný"
+    return (f"{where}, max {w}x{h} na {x},{y} "
+            f"(terminál na {out}; EXTERNAL_FROM={src}, EXTERNAL_TO={dst})")
+
+
+def info(path):
+    if not path or not os.path.exists(path):
+        print(path or "")
+        return
+    st = os.stat(path)
+    _, app, _ = resolve(path)
+    desc = subprocess.run(["file", "-b", "-L", path], capture_output=True, text=True).stdout.strip()
+    print(f"\033[1m{os.path.basename(path)}\033[0m")
+    print(f"mime:   {mime_of(path)}")
+    print(f"typ:    {desc}")
+    print(f"velik.: {human(st.st_size)}")
+    print(f"změna:  {time.strftime('%Y-%m-%d %H:%M', time.localtime(st.st_mtime))}")
+    print(f"náhled: {app}")
+    print(f"okno:   {placement_desc()}")
+    if rd("disabled"):
+        print("\n\033[33mexterní náhled vypnut (alt-p)\033[0m")
+
+
+# ---------------------------------------------------------------- hlavní běh
+def main(args):
+    if not ENV.get("NIRI_SOCKET") or not shutil.which("niri"):
+        sys.exit("fzfex: vyžaduje běžící niri (NIRI_SOCKET)")
+    fzf_args = []
+    for arg in args:                                   # vlastní volby fzfex, zbytek jde do fzf
+        if arg in ("-E", "--external"):
+            ENV["FZFEX_FORCE_EXTERNAL"] = "1"
+            ENV.setdefault("FZFEX_EXTERNAL_TO", EXTERNAL_OUTPUT or E_DEFAULT_TO)
+        elif arg.startswith("--external="):
+            ENV["FZFEX_FORCE_EXTERNAL"] = "1"
+            ENV["FZFEX_EXTERNAL_TO"] = arg.split("=", 1)[1]
+        else:
+            fzf_args.append(arg)
+    term = niri_json("focused-window")
+    ENV["FZFEX_SESSION"] = str(os.getpid())
+    ENV["FZFEX_TERM_WID"] = str(term["id"]) if term else ""
+    me = shlex.quote(SELF)
+    cmd = ["fzf",
+           "--preview", f"{me} --info {{}}",
+           "--preview-window", f"right:{PANE}%",
+           "--bind", f"focus:execute-silent({me} --show-list {{+f}})",
+           "--bind", f"multi:execute-silent({me} --show-list {{+f}})",
+           "--bind", f"alt-p:execute-silent({me} --toggle {{+f}})+refresh-preview",
+           "--bind", "ctrl-o:execute-silent(setsid -f xdg-open {} >/dev/null 2>&1)",
+           "--bind", f"enter:transform({me} --menu {{+f}})",
+           "--bind", "alt-enter:accept",
+           *fzf_args]
+    try:
+        rc = subprocess.call(cmd)
+    except KeyboardInterrupt:
+        rc = 130
+    finally:
+        wr("want", "exit")
+        with Lock():
+            close_current()
+        if rd("opened"):                               # otevřeno přes nabídku -> úspěch
+            rc = 0
+        shutil.rmtree(state_dir(), ignore_errors=True)
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    cmd, rest = (a[0], a[1:]) if a else ("", [])
+    # fzf předává cesty relativně k cwd; aplikace se spouští v adresáři souboru,
+    # proto vždy absolutní cesta (jinak např. viim dostane Downloads/Downloads/x.jpg)
+    absol = [os.path.abspath(os.path.expanduser(p)) for p in rest if p]
+    # {+f} soubor fzf smaže hned po návratu příkazu -> načíst před forkem
+    listed = read_list(rest[0]) if rest and cmd in ("--show-list", "--toggle", "--menu") else []
+    if cmd == "--show":
+        spawn_worker(absol)
+    elif cmd == "--show-list":
+        spawn_worker(listed)
+    elif cmd == "--info":
+        info(absol[0] if absol else "")
+    elif cmd == "--toggle":
+        if rd("disabled"):
+            os.remove(os.path.join(state_dir(), "disabled"))
+            spawn_worker(listed)
+        else:
+            wr("disabled", "1")
+            spawn_worker([])
+    elif cmd == "--menu":
+        menu(listed)
+    elif cmd == "--close":
+        wr("want", "close")
+        with Lock():
+            close_current()
+    elif cmd in ("-h", "--help"):
+        print(__doc__)
+    else:
+        main(a)
