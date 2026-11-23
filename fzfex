@@ -5,11 +5,11 @@ Použití:
     fzfex [volby fzf...]          # vstup ze stdin, jinak FZF_DEFAULT_COMMAND
     fzfex -E [volby fzf...]       # náhled na externím monitoru (výchozí DP-2)
     fzfex --external=VÝSTUP ...   # náhled na zadaném monitoru
-    fzfex -E -m                   # každý vybraný soubor ve vlastním okně, okna v mřížce
+    fzfex -E -m                   # náhled na interním monitoru, Tab ho připne na externí (mřížka)
 Enter = nabídka „Otevřít v…“ (po otevření fzfex skončí), alt-enter = vypsat výběr.
 Interní podpříkazy (volá je fzf):
     fzfex --show CESTA...         # zobraz náhled(y) (neblokuje, debounce)
-    fzfex --show-list SOUBOR      # totéž, cesty po řádcích v souboru ({+f} z fzf)
+    fzfex --show-list SOUBOR...   # totéž, cesty po řádcích v souborech ({+f} {f} z fzf)
     fzfex --info CESTA            # text do vnitřního preview panelu fzf
     fzfex --toggle SOUBOR         # zapni/vypni externí náhled
     fzfex --menu SOUBOR           # nabídka aplikací (fzf transform)
@@ -45,6 +45,8 @@ EXTERNAL = [o.strip() for o in _from.split(",") if o.strip()]
 EXTERNAL_OUTPUT = ENV.get("FZFEX_EXTERNAL_TO") or ENV.get("FZFEX_EXTERNAL_OUTPUT", "")
 FORCE_EXTERNAL = ENV.get("FZFEX_FORCE_EXTERNAL") == "1"   # nastaví volba -E
 E_DEFAULT_TO = "DP-2"                                     # cíl pro -E, když není FZFEX_EXTERNAL_TO
+# -E -m: aktuální soubor u terminálu, připnuté (Tab) na externím monitoru; nastaví main()
+SPLIT = ENV.get("FZFEX_SPLIT") == "1"
 EXTERNAL_SIZE = int(ENV.get("FZFEX_EXTERNAL_SIZE", "90"))  # % pracovní plochy cílového monitoru
 DEBOUNCE = float(ENV.get("FZFEX_DEBOUNCE", "0.15"))
 TIMEOUT = float(ENV.get("FZFEX_TIMEOUT", "5"))
@@ -203,11 +205,13 @@ def external_geom(term_output, windows, outs, gaps):
     aw, ah = lo["width"], work_height(windows, ws_id, lo["height"], gaps)
     w, h = aw * EXTERNAL_SIZE // 100, ah * EXTERNAL_SIZE // 100
     return {"geom": [(aw - w) // 2, (ah - h) // 2, w, h], "area": [aw, ah],
-            "gaps": gaps, "output": name}
+            "gaps": gaps, "output": name, "mon": name}
 
 
-def target_geom():
-    """-> {"geom": [x, y, w, h], "area": [šířka, výška], "gaps": n}"""
+def target_geom(external=True):
+    """-> {"geom": [x, y, w, h], "area": [šířka, výška], "gaps": n, "mon": výstup}
+
+    external=False: ignoruj externí monitor (-E) a umísti náhled k terminálu."""
     windows = niri_json("windows") or []
     tid = int(ENV.get("FZFEX_TERM_WID", "-1"))
     term = next((w for w in windows if w["id"] == tid), None)
@@ -221,8 +225,8 @@ def target_geom():
     lo = lo.get("logical") or {"width": 1920, "height": 1080}
     out_w = lo["width"]
     out_h = work_height(windows, ws_id, lo["height"], gaps)
-    area = {"area": [out_w, out_h], "gaps": gaps}
-    ext = external_geom(ws["output"] if ws else None, windows, outs, gaps)
+    area = {"area": [out_w, out_h], "gaps": gaps, "mon": ws["output"] if ws else None}
+    ext = external_geom(ws["output"] if ws else None, windows, outs, gaps) if external else None
     if ext:
         return ext
     if MODE == "fixed" or term is None:
@@ -259,11 +263,12 @@ def place(wid, tg, resize=True):
     x, y, w, h = (max(0, int(v)) for v in tg["geom"])
     aw, ah = tg["area"]
     gaps = tg["gaps"]
-    if tg.get("output"):
+    if tg.get("mon"):                                  # okno je na jiném monitoru -> přesuň
         win = next((w for w in niri_json("windows") or [] if w["id"] == wid), None)
         ws_out = {w["id"]: w["output"] for w in niri_json("workspaces") or []}
-        if win and ws_out.get(win["workspace_id"]) != tg["output"]:
-            niri_action("move-window-to-monitor", "--id", wid, tg["output"])
+        if win and ws_out.get(win["workspace_id"]) != tg["mon"]:
+            niri_action("move-window-to-monitor", "--id", wid, tg["mon"])
+            resize = True                              # buňka je jinak velká než původní místo
     niri_action("move-window-to-floating", "--id", wid)
     size = window_size(wid)
     if resize or (size and (size[0] > w or size[1] > h)):
@@ -512,7 +517,20 @@ def grid_cells(n, tg):
     return cells
 
 
-def worker(paths, gen):
+def layout(paths, pinned):
+    """-> {cesta: cíl}. V režimu SPLIT jdou připnuté do mřížky na externí monitor
+    a ostatní (aktuální soubor) k terminálu; jinak vše do jedné mřížky."""
+    if not SPLIT:
+        return dict(zip(paths, grid_cells(len(paths), target_geom())))
+    pin = [p for p in paths if p in pinned]
+    cur = [p for p in paths if p not in pinned]
+    cells = dict(zip(pin, grid_cells(len(pin), target_geom()))) if pin else {}
+    if cur:
+        cells.update(zip(cur, grid_cells(len(cur), target_geom(external=False))))
+    return cells
+
+
+def worker(paths, gen, pinned=()):
     time.sleep(DEBOUNCE)
     if rd("want") != gen:
         return
@@ -528,7 +546,7 @@ def worker(paths, gen):
         close_items([it for it in items if it not in keep])
         if not paths:
             return
-        cells = dict(zip(paths, grid_cells(len(paths), target_geom())))
+        cells = layout(paths, set(pinned))
         have = {it["path"] for it in keep}
         before = alive | {w["id"] for w in niri_json("windows") or []}
         started = []
@@ -572,13 +590,13 @@ def detach():
     return False
 
 
-def spawn_worker(paths):
+def spawn_worker(paths, pinned=()):
     gen = str(time.time_ns())
     wr("want", gen)
     if detach():
         return
     try:
-        worker(paths, gen)
+        worker(paths, gen, pinned)
     finally:
         os._exit(0)
 
@@ -741,6 +759,11 @@ def placement_desc():
     ws_out = {w["id"]: w["output"] for w in niri_json("workspaces") or []}
     out = ws_out.get(term["workspace_id"], "?") if term else "?"
     tg = target_geom()
+    if SPLIT:
+        it = target_geom(external=False)
+        ix, iy, iw, ih = it["geom"]
+        return (f"aktuální u terminálu ({out}), max {iw}x{ih} na {ix},{iy}; "
+                f"připnuté (Tab) v mřížce na {tg.get('output', '?')} (-E -m)")
     x, y, w, h = tg["geom"]
     where = f"externí monitor {tg['output']}" if tg.get("output") else f"režim {MODE}"
     if FORCE_EXTERNAL:
@@ -783,6 +806,14 @@ def main(args):
             ENV["FZFEX_EXTERNAL_TO"] = arg.split("=", 1)[1]
         else:
             fzf_args.append(arg)
+    multi = False
+    for arg in fzf_args:                               # poslední -m/--no-multi vyhrává
+        if re.fullmatch(r"-m\d*|--multi(=\d+)?", arg):
+            multi = True
+        elif arg == "--no-multi":
+            multi = False
+    if ENV.get("FZFEX_FORCE_EXTERNAL") == "1" and multi:
+        ENV["FZFEX_SPLIT"] = "1"
     term = niri_json("focused-window")
     ENV["FZFEX_SESSION"] = str(os.getpid())
     ENV["FZFEX_TERM_WID"] = str(term["id"]) if term else ""
@@ -790,9 +821,9 @@ def main(args):
     cmd = ["fzf",
            "--preview", f"{me} --info {{}}",
            "--preview-window", f"right:{PANE}%",
-           "--bind", f"focus:execute-silent({me} --show-list {{+f}})",
-           "--bind", f"multi:execute-silent({me} --show-list {{+f}})",
-           "--bind", f"alt-p:execute-silent({me} --toggle {{+f}})+refresh-preview",
+           "--bind", f"focus:execute-silent({me} --show-list {{+f}} {{f}})",
+           "--bind", f"multi:execute-silent({me} --show-list {{+f}} {{f}})",
+           "--bind", f"alt-p:execute-silent({me} --toggle {{+f}} {{f}})+refresh-preview",
            "--bind", "ctrl-o:execute-silent(setsid -f xdg-open {} >/dev/null 2>&1)",
            "--bind", f"enter:transform({me} --menu {{+f}})",
            "--bind", "alt-enter:accept",
@@ -818,17 +849,27 @@ if __name__ == "__main__":
     # proto vždy absolutní cesta (jinak např. viim dostane Downloads/Downloads/x.jpg)
     absol = [os.path.abspath(os.path.expanduser(p)) for p in rest if p]
     # {+f} soubor fzf smaže hned po návratu příkazu -> načíst před forkem
-    listed = read_list(rest[0]) if rest and cmd in ("--show-list", "--toggle", "--menu") else []
+    # --show-list/--toggle dostanou {+f} (vybrané) i {f} (pod kurzorem): připnuté náhledy
+    # zůstanou otevřené a aktuální soubor se zobrazí navíc (duplicity odstraní worker)
+    if cmd in ("--show-list", "--toggle"):
+        listed = [p for f in rest for p in read_list(f)]
+    elif cmd == "--menu" and rest:
+        listed = read_list(rest[0])
+    else:
+        listed = []
     if cmd == "--show":
         spawn_worker(absol)
     elif cmd == "--show-list":
-        spawn_worker(listed)
+        # {+f} bez označení obsahuje aktuální položku -> připnuté jen když fzf hlásí výběr
+        pinned = read_list(rest[0]) if rest and ENV.get("FZF_SELECT_COUNT", "0") != "0" else []
+        spawn_worker(listed, pinned)
     elif cmd == "--info":
         info(absol[0] if absol else "")
     elif cmd == "--toggle":
         if rd("disabled"):
             os.remove(os.path.join(state_dir(), "disabled"))
-            spawn_worker(listed)
+            pinned = read_list(rest[0]) if rest and ENV.get("FZF_SELECT_COUNT", "0") != "0" else []
+            spawn_worker(listed, pinned)
         else:
             wr("disabled", "1")
             spawn_worker([])

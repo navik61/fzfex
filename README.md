@@ -19,7 +19,7 @@ fd -t f | fzfex             # vlastní vstup
 fd -e pdf | fzfex -m        # libovolné volby fzf se předají dál
 fzfex -E                    # náhled na externím monitoru DP-2 (Samsung)
 fzfex --external=DVI-I-1    # náhled na zadaném monitoru
-fzfex -E -m                 # každý vybraný soubor (Tab) ve vlastním okně, okna v mřížce
+fzfex -E -m                 # náhled u terminálu, Tab ho připne na externí monitor (mřížka)
 ```
 
 Bez `-E` se náhled otevírá vedle terminálu. `-E` a `--external` jsou jediné vlastní volby
@@ -34,7 +34,7 @@ Instalace: `ln -s ~/Projects/FZF_Hook/fzfex ~/.local/bin/fzfex` (odkaz už je vy
 |----------|---------------------------------------------------|
 | pohyb    | zavře starý náhled, otevře nový (s debounce)      |
 | `alt-p`  | vypne nebo zapne externí náhled                   |
-| `Tab`    | (s `-m`) označí soubor, pro každý označený se otevře vlastní náhledové okno |
+| `Tab`    | (s `-m`) označí soubor; jeho náhled zůstane otevřený (připnutý) i při pohybu na další soubory. S `-E -m` se připnutý náhled přesune na externí monitor |
 | `ctrl-o` | otevře položku ve výchozí aplikaci natrvalo (fzfex běží dál) |
 | `Enter`  | průhledná nabídka **Otevřít v…**; po otevření souboru fzfex skončí |
 | `alt-enter` | vypíše výběr na stdout (původní Enter fzf); náhled se zavře |
@@ -44,8 +44,18 @@ náhled zobrazí.
 
 ### Více souborů najednou (`-m`)
 
-S volbou `-m` (`--multi`, předá se fzf) se pro **každý označený soubor** (`Tab`) otevře vlastní
-náhledové okno. Okna se proporcionálně rozmístí do mřížky:
+S volbou `-m` (`--multi`, předá se fzf) `Tab` **připne** náhled souboru: okno zůstane otevřené
+i po přechodu na jiný soubor. Vedle připnutých oken se vždy zobrazuje i náhled aktuálního souboru
+pod kurzorem, který se při pohybu mění.
+
+**`-E -m` (rozdělený režim):** náhled aktuálního souboru se zobrazuje **u terminálu na interním
+monitoru** (umístění podle `FZFEX_MODE`, stejně jako bez `-E`). Po `Tab` se jeho okno přesune na
+externí monitor do mřížky připnutých náhledů. Na externím monitoru jsou tedy jen připnuté soubory.
+Po `Shift+Tab` se okno zavře. Pokud se kurzor vrátí na připnutý soubor, interní náhled zmizí,
+protože soubor je už vidět na externím monitoru. Režim se zapne jen kombinací `-E` (nebo
+`--external=…`) a `-m`/`--multi`. Samotné `-E` dál zobrazuje vše na externím monitoru.
+
+Připnutá okna (v rozděleném režimu jen ta na externím monitoru) se proporcionálně rozmístí do mřížky:
 
 - s `-E` (nebo `FZFEX_EXTERNAL_FROM`) na **celou pracovní plochu externího monitoru**,
 - bez něj do místa vedle terminálu (podle `FZFEX_MODE`).
@@ -54,7 +64,8 @@ Počet sloupců a řádků se volí podle poměru stran monitoru tak, aby obsah 
 Neúplný poslední řádek je vycentrovaný. Okno se v buňce vycentruje; prohlížeče, které si velikost
 určují samy (viim, mpv), dostanou rozměr buňky jako maximum. Při označení nebo odznačení dalšího
 souboru zůstanou otevřená okna (jen se přeskládají), nová se otevřou a okna odznačených souborů
-se zavřou. Dokud není nic označeno, chová se fzfex jako bez `-m` (náhled aktuální položky).
+se zavřou (`Shift+Tab` připnutí zruší). Když kurzor stojí na už připnutém souboru, nové okno se
+neotevře. Dokud není nic označeno, chová se fzfex jako bez `-m` (náhled aktuální položky).
 
 ```sh
 fd -e jpg -e png | fzfex -E -m
@@ -158,9 +169,13 @@ Vestavěná pravidla (platí až po pravidlech z configu):
 ## Jak to funguje
 
 1. Na začátku si `fzfex` zapamatuje ID okna terminálu (`niri msg focused-window`).
-2. fzf má `--bind focus:…` a `multi:execute-silent(fzfex --show-list {+f})`. `{+f}` je soubor
-   s označenými položkami (bez označení s aktuální položkou). Příkaz ho načte a hned se odpojí na
-   pozadí (double fork), takže fzf nečeká.
+2. fzf má `--bind focus:…` a `multi:execute-silent(fzfex --show-list {+f} {f})`. `{+f}` je soubor
+   s označenými položkami (bez označení s aktuální položkou), `{f}` soubor s položkou pod kurzorem.
+   Příkaz oba načte (duplicity odstraní) a hned se odpojí na pozadí (double fork), takže fzf nečeká.
+   Připnuté položky pozná podle proměnné `FZF_SELECT_COUNT`, kterou fzf exportuje, protože `{+f}`
+   bez označení obsahuje aktuální položku. V režimu `-E -m` jdou připnuté do mřížky na externí
+   monitor a aktuální k terminálu. Okno, které mění monitor, se přesune
+   (`move-window-to-monitor`) a dostane velikost nové buňky.
 3. Proces na pozadí počká `FZFEX_DEBOUNCE`. Pokud mezitím přišel jiný výběr, skončí. Jinak pod
    zámkem porovná požadované soubory s otevřenými okny (stav v `state`): okna souborů, které už
    nejsou ve výběru, zavře (`close-window`, případně SIGTERM skupině procesů), pro nové soubory
