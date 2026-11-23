@@ -1,7 +1,8 @@
 # fzfex – fzf s náhledem v externím okně
 
 `fzfex` je obal kolem `fzf`. Náhled vybrané položky neukazuje v terminálu, ale v **externím okně
-aplikace podle mimetype** (obrázek → viim, PDF → zathura, video → mpv, …). Okno se umístí tak, aby
+aplikace podle mimetype** (obrázek → imv, PDF → zathura, video → mpv, …; podle výchozích aplikací
+uživatele). Okno se umístí tak, aby
 **nezakrylo seznam souborů** ve fzf. Fokus po otevření zůstane v terminálu, takže okno je aktivní
 jen tehdy, když na něj najedeš myší (`focus-follows-mouse` v niri). Když přejdeš na jinou položku,
 staré okno se zavře a otevře se náhled nové.
@@ -11,13 +12,53 @@ Určeno pro **niri (Wayland)**: polohu a velikost okna řídí přes `niri msg`.
 Soubory v projektu: `fzfex` (skript), `fzfex-menu.py` (průhledná nabídka „Otevřít v…“, GTK4)
 a `fzf-tipy.md` (poznámky k fzf).
 
+## Instalace
+
+1. Závislosti (Arch Linux):
+   ```sh
+   sudo pacman -S --needed python fzf file xdg-utils
+   sudo pacman -S --needed python-gobject gtk4   # nabídka „Otevřít v…“ (jinak se použije rofi)
+   sudo pacman -S --needed bat eza               # volitelné: hezčí náhled textu a adresářů
+   ```
+   Potřebuješ běžící **niri** a jeden z podporovaných terminálů (viz *Terminál*).
+2. Stažení a odkaz do `PATH`:
+   ```sh
+   git clone https://github.com/navik61/fzfex.git ~/Projects/fzfex
+   ln -s ~/Projects/fzfex/fzfex ~/.local/bin/fzfex
+   ```
+   `fzfex-menu.py` musí zůstat ve stejném adresáři jako skutečný soubor `fzfex` (odkaz se
+   rozbalí).
+3. Pravidla oken do `~/.config/niri/config.kdl` (doporučeno). Bez nich okna při otevření krátce
+   probliknou jako dlaždice a náhled může vzít fokus:
+   ```kdl
+   // fzfex – nabídka „Otevřít v…“
+   window-rule {
+       match app-id=r"^cz\.fzfex\.menu$"
+       open-floating true
+       focus-ring { off; }
+       border { off; }
+   }
+   // fzfex – náhledová okna (textové náhledy v terminálu mají app-id fzfex-preview)
+   window-rule {
+       match app-id=r"^(fzfex-preview|fzfex\.preview|imv|mpv|org\.pwmt\.zathura)$"
+       open-floating true
+       open-focused false
+   }
+   ```
+   Do druhého pravidla doplň app-id svých prohlížečů (zjistíš přes `niri msg windows`).
+4. Volitelně vlastní pravidla náhledu v `~/.config/fzfex/config` (viz *Konfigurace*).
+
+Nabídka „Otevřít v…“ i náhledy používají **aplikace nainstalované u daného uživatele**: `.desktop`
+soubory z `~/.local/share/applications` a `/usr/share/applications`, výchozí aplikace z jeho
+`mimeapps.list` (`xdg-mime`) a jeho `$VISUAL`/`$EDITOR`.
+
 ## Rychlé použití
 
 ```sh
 fzfex                       # soubory z FZF_DEFAULT_COMMAND
 fd -t f | fzfex             # vlastní vstup
 fd -e pdf | fzfex -m        # libovolné volby fzf se předají dál
-fzfex -E                    # náhled na externím monitoru DP-2 (Samsung)
+fzfex -E                    # náhled na externím monitoru (FZFEX_EXTERNAL_TO, jinak DP-2)
 fzfex --external=DVI-I-1    # náhled na zadaném monitoru
 fzfex -E -m                 # náhled u terminálu, Tab ho připne na externí monitor (mřížka)
 ```
@@ -26,7 +67,6 @@ Bez `-E` se náhled otevírá vedle terminálu. `-E` a `--external` jsou jediné
 `fzfex` a s volbami fzf nekolidují (fzf `-e` = přesná shoda funguje dál). Ostatní volby se
 předají fzf.
 
-Instalace: `ln -s ~/Projects/FZF_Hook/fzfex ~/.local/bin/fzfex` (odkaz už je vytvořený).
 
 ### Klávesy
 
@@ -73,8 +113,7 @@ fd -e jpg -e png | fzfex -E -m
 
 ### Nabídka „Otevřít v…“ (Enter)
 
-Enter otevře poloprůhledné okno bez rámečku ve stylu průhledného okna ze slovíček
-(`~/Projects/Jazyky/slovicka-view.py`, poznámky `pozt`) se seznamem aplikací, které umí daný
+Enter otevře poloprůhledné okno bez rámečku se seznamem aplikací, které umí daný
 mimetype otevřít (z `.desktop` souborů přes Gio). Výchozí aplikace je první. U textových souborů
 je navíc `$VISUAL`/`$EDITOR` v terminálu, u souborů s vlastním pravidlem položka **Jako náhled
 fzfex** a vždy **Vypsat cestu na stdout** (původní chování Enteru).
@@ -92,7 +131,8 @@ fzfex** a vždy **Vypsat cestu na stdout** (původní chování Enteru).
 ### Náhled na externím monitoru
 
 **Ručně přepínačem:** `fzfex -E` pošle náhled na monitor z `FZFEX_EXTERNAL_TO`. Když proměnná
-není nastavená, použije se `DP-2` (konstanta `E_DEFAULT_TO` ve skriptu). `fzfex --external=VÝSTUP`
+není nastavená, použije se `DP-2` (konstanta `E_DEFAULT_TO` ve skriptu). Když `DP-2` neexistuje,
+použije se největší jiný monitor. `fzfex --external=VÝSTUP`
 zvolí monitor přímo. Pokud je terminál přímo na cílovém monitoru, náhled jde na největší jiný
 monitor, aby nezakryl seznam.
 
@@ -110,6 +150,21 @@ na DP-2, nastav `FZFEX_EXTERNAL_FROM=eDP-1,DP-2`. Proměnné musí být exportov
 `fzfex` spouštíš (nejlépe v `~/.zshrc`). Řádek `okno:` ve vnitřním panelu fzf ukazuje, kam se
 náhled umístí, na jakém monitoru je terminál a jaké jsou hodnoty `EXTERNAL_FROM` a `EXTERNAL_TO`. Staré názvy `FZFEX_EXTERNAL` a `FZFEX_EXTERNAL_OUTPUT` fungují dál.
 Náhled se otevře vycentrovaný na aktivní ploše cílového monitoru (`move-window-to-monitor`).
+
+## Terminál
+
+Textové náhledy (`bat`, `less`, výpis adresáře), aplikace s `Terminal=true` a editor z nabídky se
+spouštějí v terminálu. Volí se automaticky:
+
+1. `FZFEX_TERM` / `FZFEX_OPEN_TERM`, pokud jsou nastavené (celý příkaz včetně přepínače pro
+   spuštění programu, např. `foot --app-id=fzfex-preview`),
+2. jinak terminál z `$TERMINAL`, pokud ho fzfex zná,
+3. jinak první nainstalovaný z: `kitty`, `foot`, `alacritty`, `wezterm`, `ghostty`, `konsole`,
+   `gnome-terminal`, `xterm`.
+
+Náhledová okna dostanou app-id `fzfex-preview` (ghostty `fzfex.preview`, protože vyžaduje app-id
+s tečkou). `konsole` a `gnome-terminal` app-id nastavit neumí, takže na ně pravidlo niri nezabere.
+Použitý terminál ukazuje řádek `term.:` ve vnitřním panelu fzf.
 
 ## Konfigurace
 
@@ -131,11 +186,12 @@ Náhled se otevře vycentrovaný na aktivní ploše cílového monitoru (`move-w
 | `FZFEX_GAPS`       | z `gaps` v `~/.config/niri/config.kdl` | mezery mezi okny v niri |
 | `FZFEX_DEBOUNCE`   | `0.15`                             | prodleva v s před otevřením (rychlé listování neotvírá každé okno) |
 | `FZFEX_TIMEOUT`    | `5`                                | jak dlouho čekat na okno aplikace (s) |
-| `FZFEX_TERM`       | `kitty --class fzfex-preview -e`   | terminál pro textové náhledy a pro aplikace s `Terminal=true` |
-| `FZFEX_OPEN_TERM`  | `kitty -e`                         | terminál pro aplikace otevřené z nabídky „Otevřít v…“ |
-| `FZFEX_MENU_STYL`  | `0`                                | barvy a font nabídky, styly 0–9 jako `SLOVICKA_STYL` (0 tmavě zelená, 3 tmavě modrá, 4 Nord…) |
+| `FZFEX_TERM`       | automaticky (viz *Terminál*)       | terminál pro textové náhledy a pro aplikace s `Terminal=true` |
+| `FZFEX_OPEN_TERM`  | automaticky (viz *Terminál*)       | terminál pro aplikace otevřené z nabídky „Otevřít v…“ |
+| `FZFEX_MENU_STYL`  | `0`                                | barvy a font nabídky, styly 0–9 (0 tmavě zelená, 3 tmavě modrá, 4 Nord…) |
 | `FZFEX_MENU_ALFA`  | `POZNAMKA_ALFA`, jinak `d0`        | krytí pozadí nabídky, hex `00`–`ff` |
 | `FZFEX_MENU_ZOOM`  | `1`                                | zvětšení nabídky |
+| `FZFEX_MENU_AMD`   | `1`                                | na hybridní grafice s AMD GPU vykreslovat nabídku na AMD (`0` = nechat výchozí GPU) |
 
 ### Pravidla podle mimetype – `~/.config/fzfex/config`
 
@@ -160,9 +216,9 @@ text/markdown = xdg
 
 Vestavěná pravidla (platí až po pravidlech z configu):
 
-- `text/*`, JSON, XML, JS, shell, TOML, YAML, prázdné soubory → `kitty … bat --paging=always`
+- `text/*`, JSON, XML, JS, shell, TOML, YAML, prázdné soubory → terminál s `bat --paging=always`
   (bez `bat` se použije `less`)
-- `inode/directory` → `kitty … eza --tree --level=2 | less` (bez `eza` se použije `ls -la`)
+- `inode/directory` → terminál s `eza --tree --level=2 | less` (bez `eza` se použije `ls -la`)
 - všechno ostatní → výchozí aplikace z `xdg-mime query default` (řádek `Exec=` z `.desktop`),
   záložně `xdg-open`
 
@@ -191,7 +247,8 @@ Vestavěná pravidla (platí až po pravidlech z configu):
    obrazovce. Výšku pracovní plochy odhaduje z výšky dlaždic na dané ploše.
 
 **Velikost okna:** aplikacím, které si velikost určují samy podle obsahu, se maximální rozměr
-předá už při spuštění: `viim -W š -H v` a `mpv --autofit-larger=šxv`. Skript jim okno nepřetahuje,
+předá už při spuštění: `mpv --autofit-larger=šxv` a `viim -W š -H v` (vlastní prohlížeč autora).
+Další lze doplnit do `SIZE_HINTS` ve skriptu. Skript jim okno nepřetahuje,
 takže obrázek se do místa vejde celý. Ostatním aplikacím se velikost nastaví přes niri.
 6. Když fzf skončí, zavřou se náhledy a smaže se stav v `$XDG_RUNTIME_DIR/fzfex-<pid>/`.
 7. Enter je `transform(fzfex --menu {+f})`: fzfex sestaví seznam aplikací, spustí `fzfex-menu.py`
@@ -204,18 +261,21 @@ nesděluje, proto se odhaduje ze šířek sloupců a `gaps`. Odhad předpoklád�
 odscrollovaný, případně že je terminál zarovnaný k pravému okraji. Když nesedí, nastav
 `FZFEX_TERM_GEOM` nebo použij `FZFEX_MODE=pane` či `fixed`.
 
-## Výchozí prohlížeč obrázků (viim)
+## Výchozí aplikace pro náhled
 
-Pro `image/png, jpeg, jpg, webp, gif, bmp, tiff, svg+xml` je přes `xdg-mime default` nastavený
-`viim.desktop` (odkaz `~/.local/share/applications/viim.desktop` → `~/Projects/Viim/viim.desktop`).
-Záloha původního nastavení je v `~/.config/mimeapps.list.bak-fzfex`. Návrat k imv:
-`xdg-mime default imv.desktop image/png` (a podobně pro další typy).
+Náhled otevírá výchozí aplikaci pro daný mimetype. Změna, např. obrázky v imv:
+`xdg-mime default imv.desktop image/png` (a podobně pro další typy), nebo pravidlo
+v `~/.config/fzfex/config`.
+
+Poznámka autora: u mě je pro obrázky výchozí `viim.desktop` (záloha původního nastavení
+`~/.config/mimeapps.list.bak-fzfex`).
 
 ## Závislosti
 
 `python3`, `fzf` ≥ 0.53 (události `multi`, akce `transform`), `niri` (IPC `niri msg`), `file`,
 `xdg-utils` (`xdg-mime`, `xdg-open`). Pro nabídku `python-gobject` s GTK4 (jinak `rofi`).
-Volitelně `kitty`, `bat`, `eza` a aplikace podle mimetype (imv, zathura, mpv…).
+Terminál (viz *Terminál*). Volitelně `bat`, `eza` a aplikace podle mimetype (imv, zathura,
+mpv…).
 
 ## Řešení problémů
 
@@ -251,8 +311,7 @@ Volitelně `kitty`, `bat`, `eza` a aplikace podle mimetype (imv, zathura, mpv…
   obrazovku, i když pak může částečně zakrýt terminál. Pro vlastní prohlížeč přidej pravidlo
   s `{w}`/`{h}` nebo ho doplň do `SIZE_HINTS` ve skriptu.
 - **Nabídka „Otevřít v…“ krátce probleskne jako dlaždice.** Skript ji přepne na plovoucí až po
-  otevření. Pomůže window-rule (app-id `cz.fzfex.menu`), které je už přidané
-  v `~/.config/niri/config.kdl` (sekce „fzfex“):
+  otevření. Pomůže window-rule (app-id `cz.fzfex.menu`) v `~/.config/niri/config.kdl`:
   ```kdl
   window-rule {
       match app-id=r"^cz\.fzfex\.menu$"
@@ -265,3 +324,12 @@ Volitelně `kitty`, `bat`, `eza` a aplikace podle mimetype (imv, zathura, mpv…
   (stejně jako „Otevřít pomocí“ ve správcích souborů). U výběru s různými typy jen ty, které umí
   všechny. Kontrola: `gio mime <mimetype>`.
 - **Mimo niri** skript skončí s chybou (vyžaduje `NIRI_SOCKET`).
+- **Textový náhled se otevře ve špatném terminálu nebo vůbec.** Zkontroluj řádek `term.:` ve
+  vnitřním panelu fzf a případně nastav `FZFEX_TERM`, např.
+  `export FZFEX_TERM="foot --app-id=fzfex-preview"`.
+- **Nabídka se nevykreslí (prázdné nebo černé okno).** Zkus `FZFEX_MENU_AMD=0`. Bez GTK4 se
+  použije `rofi -dmenu`.
+
+## Licence
+
+MIT, viz soubor [`LICENSE`](LICENSE).

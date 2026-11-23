@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Průhledná nabídka pro fzfex („Otevřít v…“) ve stylu slovicka-view.py / poznámek pozt.
+"""Průhledná nabídka pro fzfex („Otevřít v…“).
 
 Vstup (stdin, JSON): {"title": "...", "subtitle": "...", "items": [{"label": "...", "detail": "..."}]}
 Výstup: index zvolené položky na stdout a návratový kód 0; zrušení = kód 1; bez GTK4 = kód 2.
@@ -21,9 +21,25 @@ except locale.Error:
     os.environ["LC_ALL"] = "C.UTF-8"
     locale.setlocale(locale.LC_ALL, "C.UTF-8")
 
-# Vykreslovat jen na integrovaném AMD GPU (jako slovicka-view.py)
-os.environ.setdefault("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/radeon_icd.json")
-os.environ.setdefault("__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/50_mesa.json")
+# Na hybridní grafice vykreslovat na integrovaném AMD GPU (neprobouzí dedikovanou kartu).
+# Jen pokud AMD GPU v systému je a ovladače existují, jinak nechat výchozí volbu.
+def _has_amd_gpu():
+    import glob
+    for f in glob.glob("/sys/class/drm/card*/device/vendor"):
+        try:
+            if open(f).read().strip() == "0x1002":
+                return True
+        except OSError:
+            pass
+    return False
+
+
+_VK = "/usr/share/vulkan/icd.d/radeon_icd.json"
+_EGL = "/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+if os.environ.get("FZFEX_MENU_AMD", "1") == "1" and _has_amd_gpu() \
+        and os.path.exists(_VK) and os.path.exists(_EGL):
+    os.environ.setdefault("VK_DRIVER_FILES", _VK)
+    os.environ.setdefault("__EGL_VENDOR_LIBRARY_FILENAMES", _EGL)
 
 try:
     import gi
@@ -38,7 +54,7 @@ except (ImportError, ValueError):
 CSS = b"window, window.background { background: transparent; box-shadow: none; }"
 KROK = 1.2
 
-# Styly 0–9 jako ve slovicka-view.py: pozadí, text, zvýraznění, detail, font
+# Styly 0–9: pozadí, text, zvýraznění, detail, font
 STYLY = {
     0: ("#071e22", "#f4c095", "#ffd166", "#7fd1c7", "monospace"),
     1: ("#fff176", "#3e2723", "#bf360c", "#1b5e20", "Sans"),

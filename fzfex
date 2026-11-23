@@ -50,8 +50,34 @@ SPLIT = ENV.get("FZFEX_SPLIT") == "1"
 EXTERNAL_SIZE = int(ENV.get("FZFEX_EXTERNAL_SIZE", "90"))  # % pracovní plochy cílového monitoru
 DEBOUNCE = float(ENV.get("FZFEX_DEBOUNCE", "0.15"))
 TIMEOUT = float(ENV.get("FZFEX_TIMEOUT", "5"))
-TERM_CMD = ENV.get("FZFEX_TERM", "kitty --class fzfex-preview -e")
-OPEN_TERM = ENV.get("FZFEX_OPEN_TERM", "kitty -e")        # terminál pro „Otevřít v…“
+# podporované terminály: (program, náhled s app-id fzfex-preview, obyčejné spuštění příkazu)
+TERMINALS = [
+    ("kitty", "kitty --class fzfex-preview -e", "kitty -e"),
+    ("foot", "foot --app-id=fzfex-preview", "foot"),
+    ("alacritty", "alacritty --class fzfex-preview -e", "alacritty -e"),
+    ("wezterm", "wezterm start --class fzfex-preview --", "wezterm start --"),
+    ("ghostty", "ghostty --class=fzfex.preview -e", "ghostty -e"),
+    ("konsole", "konsole -e", "konsole -e"),
+    ("gnome-terminal", "gnome-terminal --wait --", "gnome-terminal --"),
+    ("xterm", "xterm -class fzfex-preview -e", "xterm -e"),
+]
+
+
+def pick_terminal():
+    """-> (příkaz pro náhled, příkaz pro „Otevřít v…“).
+
+    Pořadí: $TERMINAL (pokud ho známe), pak první nainstalovaný ze seznamu TERMINALS."""
+    pref = os.path.basename((ENV.get("TERMINAL") or "").split(" ")[0])
+    cands = sorted(TERMINALS, key=lambda t: t[0] != pref)
+    for prog, preview, plain in cands:
+        if shutil.which(prog):
+            return preview, plain
+    return "xterm -e", "xterm -e"
+
+
+_term = pick_terminal()
+TERM_CMD = ENV.get("FZFEX_TERM") or _term[0]              # textové náhledy, Terminal=true
+OPEN_TERM = ENV.get("FZFEX_OPEN_TERM") or _term[1]        # terminál pro „Otevřít v…“
 CONFIG = os.path.join(ENV.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
                       "fzfex", "config")
 SELF = os.path.realpath(sys.argv[0])
@@ -787,6 +813,7 @@ def info(path):
     print(f"velik.: {human(st.st_size)}")
     print(f"změna:  {time.strftime('%Y-%m-%d %H:%M', time.localtime(st.st_mtime))}")
     print(f"náhled: {app}")
+    print(f"term.:  {TERM_CMD.split()[0]}")
     print(f"okno:   {placement_desc()}")
     if rd("disabled"):
         print("\n\033[33mexterní náhled vypnut (alt-p)\033[0m")
