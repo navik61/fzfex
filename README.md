@@ -334,7 +334,7 @@ mpv…).
 
 Pokud ti fzfex ušetří čas, můžeš mi koupit kafe:
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/navik61)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Q7Z72B5QVS)
 
 ## Licence
 
