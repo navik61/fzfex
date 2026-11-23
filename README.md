@@ -249,7 +249,7 @@ Vestavěná pravidla (platí až po pravidlech z configu):
    obrazovce. Výšku pracovní plochy odhaduje z výšky dlaždic na dané ploše.
 
 **Velikost okna:** aplikacím, které si velikost určují samy podle obsahu, se maximální rozměr
-předá už při spuštění: `mpv --autofit-larger=šxv` a `viim -W š -H v` (vlastní prohlížeč autora).
+předá už při spuštění: `mpv --autofit-larger=šxv` a `viim -W š -H v` ([viim](https://github.com/navik61/viim), minimalistický prohlížeč autora).
 Další lze doplnit do `SIZE_HINTS` ve skriptu. Skript jim okno nepřetahuje,
 takže obrázek se do místa vejde celý. Ostatním aplikacím se velikost nastaví přes niri.
 6. Když fzf skončí, zavřou se náhledy a smaže se stav v `$XDG_RUNTIME_DIR/fzfex-<pid>/`.
@@ -269,8 +269,9 @@ Náhled otevírá výchozí aplikaci pro daný mimetype. Změna, např. obrázky
 `xdg-mime default imv.desktop image/png` (a podobně pro další typy), nebo pravidlo
 v `~/.config/fzfex/config`.
 
-Poznámka autora: u mě je pro obrázky výchozí `viim.desktop` (záloha původního nastavení
-`~/.config/mimeapps.list.bak-fzfex`).
+Tip: pro obrázky se hodí [viim](https://github.com/navik61/viim), minimalistický průhledný
+prohlížeč od stejného autora. Okno má přesně velikost obrázku a fzfex mu předá maximální rozměr
+(`-W`/`-H`), takže se náhled vejde celý.
 
 ## Závislosti
 

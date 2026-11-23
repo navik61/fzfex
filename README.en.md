@@ -233,6 +233,10 @@ To change the default preview application, e.g. images in imv:
 `xdg-mime default imv.desktop image/png` (and similarly for other types), or add a rule to
 `~/.config/fzfex/config`.
 
+Tip: for images, try [viim](https://github.com/navik61/viim), a minimalist transparent viewer by
+the same author. Its window is sized exactly to the image and fzfex passes it the maximum size
+(`-W`/`-H`), so the preview always fits.
+
 ## How it works
 
 1. At start, `fzfex` remembers the terminal window ID (`niri msg focused-window`).
@@ -265,7 +269,7 @@ To change the default preview application, e.g. images in imv:
    code is 0), `accept` to print to stdout, nothing on `Esc` (fzf keeps running).
 
 **Window size:** applications that size themselves by content get the maximum size at start:
-`mpv --autofit-larger=WxH` and `viim -W w -H h` (the author's own viewer). More can be added to
+`mpv --autofit-larger=WxH` and `viim -W w -H h` ([viim](https://github.com/navik61/viim), the author's minimalist viewer). More can be added to
 `SIZE_HINTS` in the script. Their windows aren't resized, so the image fits entirely. Other
 applications are resized via niri.
 
