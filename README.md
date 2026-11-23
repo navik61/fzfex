@@ -1,5 +1,7 @@
 # fzfex – fzf s náhledem v externím okně
 
+**Česky** · [English](README.en.md)
+
 `fzfex` je obal kolem `fzf`. Náhled vybrané položky neukazuje v terminálu, ale v **externím okně
 aplikace podle mimetype** (obrázek → imv, PDF → zathura, video → mpv, …; podle výchozích aplikací
 uživatele). Okno se umístí tak, aby
