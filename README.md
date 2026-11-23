@@ -330,6 +330,12 @@ mpv…).
 - **Nabídka se nevykreslí (prázdné nebo černé okno).** Zkus `FZFEX_MENU_AMD=0`. Bez GTK4 se
   použije `rofi -dmenu`.
 
+## Podpora
+
+Pokud ti fzfex ušetří čas, můžeš mi koupit kafe:
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/navik61)
+
 ## Licence
 
 MIT, viz soubor [`LICENSE`](LICENSE).
