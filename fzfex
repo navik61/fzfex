@@ -15,7 +15,7 @@ Interní podpříkazy (volá je fzf):
     fzfex --menu SOUBOR           # nabídka aplikací (fzf transform)
     fzfex --close                 # zavři aktuální náhledová okna
     fzfex --focus                 # fokus terminál -> náhled -> další náhled -> terminál
-                                  # (ctrl-v ve fzf; lze navázat i na globální zkratku niri)
+                                  # (pro globální zkratku niri, např. Mod+P)
 """
 
 import fcntl
@@ -53,7 +53,6 @@ SPLIT = ENV.get("FZFEX_SPLIT") == "1"
 EXTERNAL_SIZE = int(ENV.get("FZFEX_EXTERNAL_SIZE", "90"))  # % pracovní plochy cílového monitoru
 DEBOUNCE = float(ENV.get("FZFEX_DEBOUNCE", "0.15"))
 TIMEOUT = float(ENV.get("FZFEX_TIMEOUT", "5"))
-FOCUS_KEY = ENV.get("FZFEX_FOCUS_KEY", "ctrl-v")         # klávesa fzf pro přepnutí fokusu
 # podporované terminály: (program, náhled s app-id fzfex-preview, obyčejné spuštění příkazu)
 TERMINALS = [
     ("kitty", "kitty --class fzfex-preview -e", "kitty -e"),
@@ -643,7 +642,7 @@ def read_list(f):
 
 # ---------------------------------------------------------------- přepínání fokusu
 def focus_cycle():
-    """Terminál -> náhled -> další náhled -> … -> terminál.
+    """Terminál -> náhled -> další náhled -> … -> terminál (globální zkratka niri).
 
     Funguje i bez FZFEX_SESSION (globální zkratka niri): projde všechna běžící sezení
     a najde to, ke kterému patří okno s fokusem; jinak vezme sezení z prostředí
@@ -904,7 +903,6 @@ def main(args):
            "--bind", "ctrl-o:execute-silent(setsid -f xdg-open {} >/dev/null 2>&1)",
            "--bind", f"enter:transform({me} --menu {{+f}})",
            "--bind", "alt-enter:accept",
-           "--bind", f"{FOCUS_KEY}:execute-silent({me} --focus)",
            *fzf_args]
     try:
         rc = subprocess.call(cmd)
