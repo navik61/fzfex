@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# Lokální kontext pro Claude Code (osobní cesty)
+CLAUDE.md
