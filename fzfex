@@ -14,10 +14,13 @@ Interní podpříkazy (volá je fzf):
     fzfex --toggle SOUBOR         # zapni/vypni externí náhled
     fzfex --menu SOUBOR           # nabídka aplikací (fzf transform)
     fzfex --close                 # zavři aktuální náhledová okna
+    fzfex --focus                 # fokus terminál -> náhled -> další náhled -> terminál
+                                  # (ctrl-v ve fzf; lze navázat i na globální zkratku niri)
 """
 
 import fcntl
 import fnmatch
+import glob
 import json
 import math
 import os
@@ -50,6 +53,7 @@ SPLIT = ENV.get("FZFEX_SPLIT") == "1"
 EXTERNAL_SIZE = int(ENV.get("FZFEX_EXTERNAL_SIZE", "90"))  # % pracovní plochy cílového monitoru
 DEBOUNCE = float(ENV.get("FZFEX_DEBOUNCE", "0.15"))
 TIMEOUT = float(ENV.get("FZFEX_TIMEOUT", "5"))
+FOCUS_KEY = ENV.get("FZFEX_FOCUS_KEY", "ctrl-v")         # klávesa fzf pro přepnutí fokusu
 # podporované terminály: (program, náhled s app-id fzfex-preview, obyčejné spuštění příkazu)
 TERMINALS = [
     ("kitty", "kitty --class fzfex-preview -e", "kitty -e"),
@@ -637,6 +641,50 @@ def read_list(f):
     return [os.path.abspath(os.path.expanduser(ln)) for ln in lines if ln]
 
 
+# ---------------------------------------------------------------- přepínání fokusu
+def focus_cycle():
+    """Terminál -> náhled -> další náhled -> … -> terminál.
+
+    Funguje i bez FZFEX_SESSION (globální zkratka niri): projde všechna běžící sezení
+    a najde to, ke kterému patří okno s fokusem; jinak vezme sezení z prostředí
+    nebo naposledy změněné a přepne na jeho terminál."""
+    foc = (niri_json("focused-window") or {}).get("id")
+    alive = {w["id"] for w in niri_json("windows") or []}
+    run = ENV.get("XDG_RUNTIME_DIR", "/tmp")
+    sessions = []
+    for d in glob.glob(os.path.join(run, "fzfex-*")):
+        try:
+            with open(os.path.join(d, "term")) as f:
+                term = int(f.read().strip())
+        except (OSError, ValueError):
+            continue
+        try:
+            with open(os.path.join(d, "state")) as f:
+                st = json.loads(f.read() or "[]")
+        except (OSError, ValueError):
+            st = []
+        if not isinstance(st, list):
+            st = []
+        if term not in alive:                          # pozůstatek spadlého sezení
+            continue
+        wins = [it.get("wid") for it in st if isinstance(it, dict) and it.get("wid") in alive]
+        sessions.append((os.path.basename(d) == f"fzfex-{ENV.get('FZFEX_SESSION')}",
+                         os.path.getmtime(d), term, wins))
+    if not sessions:
+        return
+    sessions.sort(reverse=True)                        # vlastní sezení, pak nejnovější
+    for _, _, term, wins in sessions:
+        if foc == term:
+            if wins:
+                niri_action("focus-window", "--id", wins[0])
+            return
+        if foc in wins:
+            i = wins.index(foc) + 1
+            niri_action("focus-window", "--id", wins[i] if i < len(wins) else term)
+            return
+    niri_action("focus-window", "--id", sessions[0][2])  # fokus jinde -> zpět do fzf
+
+
 # ---------------------------------------------------------------- nabídka „Otevřít v…“
 TEXTUAL = ("text/", "application/json", "application/xml", "application/javascript",
            "application/x-shellscript", "application/toml", "application/x-yaml", "inode/x-empty")
@@ -844,6 +892,8 @@ def main(args):
     term = niri_json("focused-window")
     ENV["FZFEX_SESSION"] = str(os.getpid())
     ENV["FZFEX_TERM_WID"] = str(term["id"]) if term else ""
+    if term:
+        wr("term", str(term["id"]))                    # pro fzfex --focus bez FZFEX_SESSION
     me = shlex.quote(SELF)
     cmd = ["fzf",
            "--preview", f"{me} --info {{}}",
@@ -854,6 +904,7 @@ def main(args):
            "--bind", "ctrl-o:execute-silent(setsid -f xdg-open {} >/dev/null 2>&1)",
            "--bind", f"enter:transform({me} --menu {{+f}})",
            "--bind", "alt-enter:accept",
+           "--bind", f"{FOCUS_KEY}:execute-silent({me} --focus)",
            *fzf_args]
     try:
         rc = subprocess.call(cmd)
@@ -906,6 +957,8 @@ if __name__ == "__main__":
         wr("want", "close")
         with Lock():
             close_current()
+    elif cmd == "--focus":
+        focus_cycle()
     elif cmd in ("-h", "--help"):
         print(__doc__)
     else:

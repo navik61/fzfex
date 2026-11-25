@@ -80,9 +80,26 @@ předají fzf.
 | `ctrl-o` | otevře položku ve výchozí aplikaci natrvalo (fzfex běží dál) |
 | `Enter`  | průhledná nabídka **Otevřít v…**; po otevření souboru fzfex skončí |
 | `alt-enter` | vypíše výběr na stdout (původní Enter fzf); náhled se zavře |
+| `ctrl-v` | přepne fokus do náhledového okna (s více náhledy postupně dalším, po posledním zpět do terminálu) |
 
 Vnitřní preview panel fzf ukazuje informace o souboru: mime, typ, velikost, datum a aplikaci, která
 náhled zobrazí.
+
+### Přepínání fokusu (`ctrl-v`, `fzfex --focus`)
+
+`ctrl-v` ve fzf dá fokus náhledovému oknu, takže v něm můžeš ovládat aplikaci z klávesnice
+(zoom, posun, přehrávání…). Klávesy stisknuté v náhledu ale k fzf nedorazí. Zpět se dostaneš
+myší (`focus-follows-mouse`) nebo globální zkratkou niri, která volá `fzfex --focus`:
+
+```kdl
+binds {
+    Mod+P hotkey-overlay-title="fzfex: fokus terminál ↔ náhled" { spawn "fzfex" "--focus"; }
+}
+```
+
+`fzfex --focus` cyklí terminál → náhled → další náhled → … → terminál. Sezení fzfex najde podle
+okna, které má fokus. Když je fokus jinde, přepne do terminálu naposledy spuštěného fzfex.
+Klávesu ve fzf změníš proměnnou `FZFEX_FOCUS_KEY`.
 
 ### Více souborů najednou (`-m`)
 
@@ -188,6 +205,7 @@ Použitý terminál ukazuje řádek `term.:` ve vnitřním panelu fzf.
 | `FZFEX_GAPS`       | z `gaps` v `~/.config/niri/config.kdl` | mezery mezi okny v niri |
 | `FZFEX_DEBOUNCE`   | `0.15`                             | prodleva v s před otevřením (rychlé listování neotvírá každé okno) |
 | `FZFEX_TIMEOUT`    | `5`                                | jak dlouho čekat na okno aplikace (s) |
+| `FZFEX_FOCUS_KEY`  | `ctrl-v`                           | klávesa fzf pro přepnutí fokusu terminál ↔ náhled |
 | `FZFEX_TERM`       | automaticky (viz *Terminál*)       | terminál pro textové náhledy a pro aplikace s `Terminal=true` |
 | `FZFEX_OPEN_TERM`  | automaticky (viz *Terminál*)       | terminál pro aplikace otevřené z nabídky „Otevřít v…“ |
 | `FZFEX_MENU_STYL`  | `0`                                | barvy a font nabídky, styly 0–9 (0 tmavě zelená, 3 tmavě modrá, 4 Nord…) |

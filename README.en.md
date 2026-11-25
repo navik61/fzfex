@@ -81,9 +81,26 @@ Everything else is passed to fzf.
 | `ctrl-o`    | opens the item in the default application permanently (fzfex keeps running) |
 | `Enter`     | translucent **Open with…** menu; fzfex exits after opening the file |
 | `alt-enter` | prints the selection to stdout (fzf's original Enter); previews close |
+| `ctrl-v` | moves focus to the preview window (with several previews to the next one, after the last back to the terminal) |
 
 The fzf preview pane shows file information: mimetype, type, size, date, the application used for
 the preview (`náhled:`), the window placement (`okno:`) and the terminal (`term.:`).
+
+### Switching focus (`ctrl-v`, `fzfex --focus`)
+
+`ctrl-v` in fzf focuses the preview window, so you can control the application from the
+keyboard (zoom, pan, playback…). Keys pressed in the preview do not reach fzf, though. Get back
+with the mouse (`focus-follows-mouse`) or with a global niri shortcut that runs `fzfex --focus`:
+
+```kdl
+binds {
+    Mod+P hotkey-overlay-title="fzfex: focus terminal ↔ preview" { spawn "fzfex" "--focus"; }
+}
+```
+
+`fzfex --focus` cycles terminal → preview → next preview → … → terminal. It finds the fzfex
+session by the focused window; when focus is elsewhere, it switches to the terminal of the most
+recently started fzfex. Change the fzf key with `FZFEX_FOCUS_KEY`.
 
 ### Multiple files (`-m`)
 
@@ -193,6 +210,7 @@ match them. The terminal in use is shown on the `term.:` line of the fzf preview
 | `FZFEX_GAPS`       | from `gaps` in `~/.config/niri/config.kdl` | gaps between windows in niri |
 | `FZFEX_DEBOUNCE`   | `0.15`                             | delay in seconds before opening (fast scrolling doesn't open every window) |
 | `FZFEX_TIMEOUT`    | `5`                                | how long to wait for the application window (s) |
+| `FZFEX_FOCUS_KEY`  | `ctrl-v`                           | fzf key that switches focus terminal ↔ preview |
 | `FZFEX_TERM`       | automatic (see *Terminal*)         | terminal for text previews and `Terminal=true` applications |
 | `FZFEX_OPEN_TERM`  | automatic (see *Terminal*)         | terminal for applications opened from the "Open with…" menu |
 | `FZFEX_MENU_STYL`  | `0`                                | menu colours and font, styles 0–9 (0 dark green, 3 dark blue, 4 Nord…) |
