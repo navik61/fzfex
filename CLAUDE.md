@@ -17,5 +17,5 @@
   - `Mod+P` hned po pohybu: worker po otevření náhledu volá `refocus_terminal()` → může fokus vrátit terminálu (zatím neřešeno).
   - `~/.config/niri/config.kdl` je symlink → editovat cíl v `~/dotfiles` (Edit na symlink selže).
 - Commity: česky, uživatel navik61; repo veřejné na GitHubu (navik61/fzfex).
-- Stav (2026-11-25): přepínání fokusu přes `Mod+P` funguje (ověřil uživatel); commity lokálně, nepushnuto; změna niri configu v dotfiles necommitnuta.
-- Další krok: push.
+- Stav (2026-11-25): přepínání fokusu přes `Mod+P` hotové a pushnuté; niri bind commitnut v dotfiles (8858cfb).
+- Další krok: případně řešit `refocus_terminal()` vs. `Mod+P` hned po pohybu.
