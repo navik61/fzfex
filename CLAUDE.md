@@ -14,4 +14,8 @@
   - `focus-window` v niri vytáhne plovoucí okno nahoru → `refocus_terminal()` jen když fokus opravdu ztratil.
   - Přiřazení oken podle session id PID; po 1 s bere i cizí nová okna (jednoinstanční aplikace).
   - Uživatel má `focus-follows-mouse`.
+  - `ctrl-v` hned po pohybu: worker po otevření náhledu volá `refocus_terminal()` → může fokus vrátit terminálu (zatím neřešeno).
+  - `~/.config/niri/config.kdl` je symlink → editovat cíl v `~/dotfiles` (Edit na symlink selže).
 - Commity: česky, uživatel navik61; repo veřejné na GitHubu (navik61/fzfex).
+- Stav (2026-11-25): přepínání fokusu commitnuto lokálně, nepushnuto, v reálném fzfex neotestováno; změna niri configu v dotfiles necommitnuta.
+- Další krok: ručně otestovat `ctrl-v`/`Mod+P` (i s `-m`, `-E -m`), pak push.
