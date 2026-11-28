@@ -76,7 +76,7 @@ předají fzf.
 |----------|---------------------------------------------------|
 | pohyb    | zavře starý náhled, otevře nový (s debounce)      |
 | `alt-p`  | vypne nebo zapne externí náhled                   |
-| `Tab`    | (s `-m`) označí soubor; jeho náhled zůstane otevřený (připnutý) i při pohybu na další soubory. S `-E -m` se připnutý náhled přesune na externí monitor |
+| `Tab`    | (s `-m`) označí soubor (kurzor zůstane na místě, nepřeskočí na další); jeho náhled zůstane otevřený (připnutý) i při pohybu na další soubory. S `-E -m` se připnutý náhled přesune na externí monitor |
 | `ctrl-o` | otevře položku ve výchozí aplikaci natrvalo (fzfex běží dál) |
 | `Enter`  | průhledná nabídka **Otevřít v…**; po otevření souboru fzfex skončí |
 | `alt-enter` | vypíše výběr na stdout (původní Enter fzf); náhled se zavře |

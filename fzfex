@@ -903,6 +903,7 @@ def main(args):
            "--bind", "ctrl-o:execute-silent(setsid -f xdg-open {} >/dev/null 2>&1)",
            "--bind", f"enter:transform({me} --menu {{+f}})",
            "--bind", "alt-enter:accept",
+           *(["--bind", "tab:toggle"] if multi else []),   # Tab označí, kurzor zůstane
            *fzf_args]
     try:
         rc = subprocess.call(cmd)

@@ -77,7 +77,7 @@ Everything else is passed to fzf.
 |-------------|-----------------------------------------------------|
 | movement    | closes the old preview, opens a new one (debounced) |
 | `alt-p`     | toggles the external preview off/on                 |
-| `Tab`       | (with `-m`) marks the file; its preview stays open (pinned) while you move to other files. With `-E -m` the pinned preview moves to the external monitor |
+| `Tab`       | (with `-m`) marks the file (the cursor stays put, it does not move to the next one); its preview stays open (pinned) while you move to other files. With `-E -m` the pinned preview moves to the external monitor |
 | `ctrl-o`    | opens the item in the default application permanently (fzfex keeps running) |
 | `Enter`     | translucent **Open with…** menu; fzfex exits after opening the file |
 | `alt-enter` | prints the selection to stdout (fzf's original Enter); previews close |
